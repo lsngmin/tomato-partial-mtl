@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (large, do not version)
+data/raw/
+data/processed/
+valid/
+
+# Results & experiment tracking
+results/
+wandb/
+mlruns/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# Generated docs
+docs/data_card.md
+
+# IDE / OS
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+*.iml
