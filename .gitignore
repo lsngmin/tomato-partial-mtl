@@ -16,6 +16,8 @@ env/
 data/raw/
 data/processed/
 valid/
+package/
+package.zip
 
 # Results & experiment tracking
 results/
@@ -36,3 +38,6 @@ Thumbs.db
 *.swp
 .idea/
 *.iml
+
+# MS Office temp/lock files
+~$*

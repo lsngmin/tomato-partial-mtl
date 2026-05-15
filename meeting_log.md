@@ -1,7 +1,7 @@
 # 📝 논문 회의록 (최종 수정본)
 
-> **마지막 업데이트**: 2026-05-14 (선행연구 정독 결과 반영, **CTDR 포지셔닝 재조정 필요**)
-> **상태**: EDA + 학습 데이터 매칭 + 외부 검증셋 처리 완료, **선행연구 정독 완료** — CTDR 신규성 재평가, 포지셔닝 합의 필요
+> **마지막 업데이트**: 2026-05-14 (실험 범위 + 백본 전략 + 비교 매트릭스 확정)
+> **상태**: EDA + 학습 데이터 + 외부 검증셋 + 선행연구 정독 완료. **실험 범위 / 백본 / 비교 구도 확정**, 코드 작성 진입 준비
 
 ---
 
@@ -395,33 +395,125 @@ RQ4: 게이트가 의미 있는 분리를 학습하는가?
      → 게이트 시각화 + t-SNE + CKA 분석
 ```
 
-### 9.4 평가 방식
+### 9.4 평가 방식 (★ 비교 매트릭스 확정)
 
-```
-[Maturity 평가] — valid_maturity.csv (890장)
-  ①, ②, ④, ⑤, ⑥의 maturity 출력 비교
-  + bootstrap CI for Immature (n=93)
+#### Maturity 평가셋 (valid_maturity.csv, n=890)에서
 
-[Quality 평가] — valid_quality.csv (1,556장)
-  ①, ③, ④, ⑤, ⑥의 quality 출력 비교
+| 모델 | 출력 | 메인 비교 대상 | 핵심 질문 |
+|---|---|---|---|
+| ① CV Baseline | Immature/Mature | ② vs CV | "DL이 정말 필요한가?" |
+| ② Single-task Maturity | Immature/Mature | ⑤ vs ② | "MTL이 single-task보다 좋나?" |
+| ④ Joint Single-head | Mat/Immat 출력 | ⑥ vs ④ | "Multi-head가 single-head보다 좋나?" |
+| ⑤ Naive Multi-head | Maturity 헤드 | ⑥ vs ⑤ | "우리 모듈이 naive보다 좋나?" |
+| ⑥ Ours | Maturity 헤드 | (전부 비교) | 메인 contribution |
 
-❌ Maturity vs Quality 직접 비교 안 함 (다른 평가셋)
-```
+#### Quality 평가셋 (valid_quality.csv, n=1,556)에서
+
+| 모델 | 출력 | 메인 비교 대상 | 핵심 질문 |
+|---|---|---|---|
+| ① CV Baseline | Fresh/Rotten | ③ vs CV | "DL이 정말 필요한가?" |
+| ③ Single-task Quality | Fresh/Rotten | ⑤ vs ③ | "MTL이 single-task보다 좋나?" |
+| ④ Joint Single-head | Fresh/Rotten 출력 | ⑥ vs ④ | "Multi-head가 single-head보다 좋나?" |
+| ⑤ Naive Multi-head | Quality 헤드 | ⑥ vs ⑤ | "우리 모듈이 naive보다 좋나?" |
+| ⑥ Ours | Quality 헤드 | (전부 비교) | 메인 contribution |
+
+#### 비교 규칙
+- ✅ 각 태스크 평가셋에서 ① ② ④ ⑤ ⑥ (또는 ① ③ ④ ⑤ ⑥) 모두 비교
+- ❌ ② vs ③ 비교 안 함 (다른 태스크)
+- ❌ Maturity 점수와 Quality 점수 직접 비교 안 함
+- ✅ Bootstrap CI for Immature (n=93)
+- ✅ Per-class precision/recall/F1 보고
+
+### 9.5 ★ Must vs Optional 실험 분류
+
+#### MUST (생략 시 reject 위험)
+
+| 항목 | 비용 (5 seeds 기준) |
+|---|---|
+| ② Single-task Maturity | 5 runs |
+| ③ Single-task Quality | 5 runs |
+| ⑤ Naive Multi-head | 5 runs |
+| ⑥ Ours | 5 runs |
+| 외부 검증 (Maturity + Quality) | 평가만 (학습 X) |
+| A5 — CTDR Component Ablation (4 variants × 3 seeds) | 12 runs |
+| Multi-seed (위 모든 모델 5 seeds) | 위에 포함 |
+| Macro-F1, per-class metrics, Bootstrap CI | 비용 0 |
+
+#### STRONGLY EXPECTED (생략 시 reviewer 질문)
+
+| 항목 | 비용 |
+|---|---|
+| ① CV Baseline (HOG+SVM 1개) | CPU 1시간 |
+| ④ Joint Single-head | 5 runs |
+| A2 — 백본 generality (⑤+⑥ × 2 추가 백본 × 3 seeds) | 12 runs |
+| A6 — 기존 MTL 비교 (Cross-Stitch + MMoE × 3 seeds) | 6 runs |
+
+#### OPTIONAL (있으면 좋음)
+- Representation 분석 (t-SNE / CKA / Grad-CAM / gate viz)
+- ECE Calibration (A7)
+- TTA 분석 (Immature 93장 보강)
+- A3 손실 가중치 grid
+
+#### SKIP (생략해도 무방)
+- 더 많은 백본 (4개 이상)
+- 더 많은 시드 (10개)
+- Hyperparameter grid 전체
 
 ---
 
-## 10. 통제 변수
+## 10. 통제 변수 (확정)
 
 | 변수 | 모든 모델 공통 | 통제 |
 |---|---|---|
-| 데이터셋 출처 | Sher-e-Bangla | ✅ 동일 |
-| 백본 아키텍처 | 메인 1개 (TBD: ResNet50 / EfficientNet-B3 / ViT-Base) | ✅ 동일 |
-| 입력 크기 | 224×224 | ✅ 동일 |
+| 데이터셋 출처 | Sher-e-Bangla (학습 10,000장 매칭) | ✅ 동일 |
+| **메인 백본** | **ResNet50** ⭐ | ✅ 동일 |
+| 입력 크기 | 224 × 224 | ✅ 동일 |
 | Optimizer | Adam | ✅ 동일 |
 | Learning rate | 1e-4 | ✅ 동일 |
 | Batch size | 32 | ✅ 동일 |
-| Seed | 42 (메인) + 5개 추가 (안정성) | ✅ 동일 |
+| Seed | 42 (메인) + 추가 4개 (총 5 seeds) | ✅ 동일 |
 | Pretrained weights | ImageNet | ✅ 동일 |
+| Epochs | 50 (early stopping 미적용 — 전체 학습 데이터 사용) | ✅ 동일 |
+
+### 10.1 ★ 백본 전략 (계층적 접근)
+
+**메인 결과**: ResNet50 단독 사용
+- 가장 표준적, 안정적, 빠름 (~30~40분/run)
+- 비교: ② ③ ④ ⑤ ⑥ × 5 seeds = 25 runs
+
+**A2 백본 generality ablation**: ⑤ vs ⑥ 만 2개 백본 추가
+- EfficientNet-B3 (효율 ↑, 모던, compound scaling)
+- Swin-Tiny (Transformer 계열, data-efficient)
+- 2 모델 × 2 백본 × 3 seeds = 12 runs
+
+이 전략으로 다음 메시지 입증 가능:
+> "Our module consistently outperforms naive multi-head across CNN (ResNet50, EfficientNet-B3) and Transformer (Swin-Tiny) backbones, demonstrating the benefit comes from the routing mechanism itself rather than the backbone choice."
+
+### 10.2 총 GPU 시간 추산 (A40 1대)
+
+```
+필수 (MUST):                                  
+  메인 5 모델 × 5 seeds (ResNet50)            ≈ 14시간
+  A5 CTDR component ablation                  ≈ 8시간
+  ① CV baseline (CPU)                         ≈ 1시간 (GPU 사용 X)
+                                              ──────────
+                                              ≈ 22시간
+
+기대 (STRONGLY EXPECTED):
+  A2 백본 (⑤+⑥ × 2 백본 × 3 seeds)            ≈ 9시간
+  A6 기존 MTL 비교 (Cross-Stitch + MMoE)       ≈ 4시간
+                                              ──────────
+                                              ≈ 13시간
+
+선택 (OPTIONAL):
+  A3 손실 가중치 grid                          ≈ 8시간
+
+────────────────────────────────────────────────────────
+합계 (필수+기대):  ≈ 35 시간 (1.5일)
+합계 (전체):       ≈ 43 시간 (2일)
+```
+
+→ A40 GPU 1대로 **2-3일 내 모든 실험 완료 가능**.
 
 ---
 
@@ -576,9 +668,12 @@ C:\Users\smin\IdeaProjects\tomato\
 - [x] 모델 아키텍처 설명서 작성 (`docs/model_architectures.md`)
 
 ### 🎯 진행 중
-- [ ] **Contribution 포지셔닝 최종 결정** (옵션 1/2/3 중)
+- [ ] **Contribution 포지셔닝 최종 결정** (옵션 1/2/3 중, 지도교수 합의)
 - [ ] 모듈 이름 재결정 (CTDR 유지 vs 더 솔직한 이름)
-- [ ] 백본 결정 (ResNet50 / EfficientNet-B3 / ViT-Base 중 1개)
+- [x] **백본 전략 확정**: 메인 = ResNet50, A2 = EfficientNet-B3 + Swin-Tiny
+- [x] **실험 범위 확정**: MUST + STRONGLY EXPECTED (총 ~35 GPU 시간)
+- [x] **비교 매트릭스 확정**: 각 태스크 평가셋에서 5개 모델 모두 비교
+- [ ] PyTorch Dataset 클래스 (masked label 지원) 구현
 - [ ] 모듈 코드 구현 (nn.Module 직접 작성)
 
 ### 📅 다음 단계 (예정)
@@ -626,14 +721,8 @@ C:\Users\smin\IdeaProjects\tomato\
   - [ ] 더 솔직한 이름 (예: ADRR — Adapted Disentangled Routing & Regularization)
   - [ ] 다른 이름: ___________
 
-- **백본 선택**:
-  - [ ] ResNet50 (안전, 표준)
-  - [ ] EfficientNet-B3 (효율 + 최신)
-  - [ ] ViT-Base (transformer)
-  - → Ablation A2에서 비교하되, **메인은 하나 선정**
-
 - **구현 시작 순서**:
-  - [ ] (a) Baseline → Naive 멀티 → CTDR (motivation 입증 강함)
+  - [x] **(a) Baseline → Naive 멀티 → CTDR** ⭐ (motivation 입증 강함, 채택)
   - [ ] (b) CTDR 먼저 + baseline 채워가기
 
 ### 16.3 ✅ 해결 완료
@@ -641,6 +730,10 @@ C:\Users\smin\IdeaProjects\tomato\
 - ~~클래스 불균형 처리~~ → **Option X 매칭으로 균형 (가중치 불필요)**
 - ~~Pretrained 사용 여부~~ → **ImageNet 가중치 사용 + 모듈 코드 자작**
 - ~~"새 모듈" novelty 주장~~ → **선행연구 정독 결과 "Adapted + integrated"로 재포지셔닝**
+- ~~메인 백본 선택~~ → **ResNet50** ⭐ (A2 ablation: EfficientNet-B3 + Swin-Tiny)
+- ~~실험 범위~~ → **MUST + STRONGLY EXPECTED 모두 진행, OPTIONAL 일부 선택**
+- ~~②③④ 비교 필요성~~ → **모두 학습 + 비교 필수 (메인 결과 표에서 5개 모두 보여줌)**
+- ~~②와 ③ 직접 비교~~ → **❌ 안 함 (다른 태스크)**, 단 각 태스크 평가셋에서 다른 모델과는 모두 비교
 
 ---
 
@@ -735,10 +828,26 @@ C:\Users\smin\IdeaProjects\tomato\
   - 모듈 이름 (CTDR 유지 vs 변경)
   - Venue 백업 plan 확정
 
-### 회의 8 (예정): 포지셔닝 최종 결정 + 코드 작성 시작
-- Contribution 옵션 1/2/3 중 선택
-- 백본 1개 선정 (ResNet50 / EfficientNet-B3 / ViT-Base)
-- 모듈 이름 확정
+### 회의 8: 실험 범위 + 백본 + 비교 매트릭스 확정 (2026-05-14) ⭐
+- **메인 백본 = ResNet50** 결정 (안정, 빠름, 표준)
+- **A2 백본 ablation**: EfficientNet-B3 + Swin-Tiny (Transformer 계열)
+  - 단, ⑤ vs ⑥만 다른 백본에서 반복 (목적: 우리 모듈의 generality 입증)
+- **비교 매트릭스 명확화**:
+  - 각 태스크 평가셋에서 5개 모델 모두 비교 (① ② ④ ⑤ ⑥ on Maturity; ① ③ ④ ⑤ ⑥ on Quality)
+  - ② vs ③ 비교는 의미 없음 (다른 태스크)
+- **실험 범위 분류**: MUST / STRONGLY EXPECTED / OPTIONAL / SKIP
+  - MUST + STRONGLY EXPECTED = 총 ~35 GPU 시간 (A40 1대로 2-3일)
+- **구현 순서 확정**: (a) Baseline → Naive 멀티 → Ours
+- **참고용 Q1 venue** (CEA 등) — 백업 plan으로 검토 가능
+- **JFE 참고 논문 식별**:
+  - ViT 기반 food image (JFE 2024, 365:111833)
+  - Swin Transformer 식품 분류 (JFE 2024, 380:112134)
+  - Apple defect detection (JFE 2020)
+  - Facilitated ML for fruit quality (JFE 2022)
+
+### 회의 9 (예정): 모듈 이름 + Contribution 옵션 + 코드 작성 시작
+- 모듈 이름 확정 (CTDR / ADRR / 기타)
+- Contribution 옵션 1/2/3 중 선택 (지도교수 합의 필요)
 - Dataset 클래스 + 모듈 구현 시작
 
 ---
