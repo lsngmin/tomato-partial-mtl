@@ -141,6 +141,10 @@ class TomatoDataset(Dataset):
         else:
             y_mat, y_qual = MASK_INDEX, cls_idx
 
+        # None 은 PyTorch default_collate 가 처리 못 하므로 빈 문자열로 대체
+        def _nz(v):
+            return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v)
+
         return {
             "image": image,
             "y_mat": torch.tensor(y_mat, dtype=torch.long),
@@ -148,9 +152,9 @@ class TomatoDataset(Dataset):
             "task": task,
             "meta": {
                 "filepath": str(path),
-                "content_hash": row.get("content_hash", None),
-                "dataset_type": row.get("dataset_type", None),
-                "original_basename": row.get("original_basename", None),
+                "content_hash": _nz(row.get("content_hash", "")),
+                "dataset_type": _nz(row.get("dataset_type", "")),
+                "original_basename": _nz(row.get("original_basename", "")),
             },
         }
 
