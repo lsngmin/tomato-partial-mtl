@@ -68,26 +68,34 @@ def main():
     print(f"Package root: {pkg}")
 
     # ── 데이터 로드 ───────────────────────────────────────
-    train_df = pd.read_csv(pkg / "manifest" / "train.csv")
-    train_df = filter_by_task(train_df, args.task)
+    # In-distribution split (메인 평가): train/val/test
+    # External valid (보조 OOD): valid_{task}.csv
+    train_df = filter_by_task(pd.read_csv(pkg / "manifest" / "train_split.csv"), args.task)
+    val_df   = filter_by_task(pd.read_csv(pkg / "manifest" / "val_split.csv"),   args.task)
+    test_df  = filter_by_task(pd.read_csv(pkg / "manifest" / "test_split.csv"),  args.task)
+    ext_df   = pd.read_csv(pkg / "manifest" / f"valid_{args.task}.csv")
     print(f"Train ({args.task}): {len(train_df)}")
+    print(f"Val   ({args.task}): {len(val_df)}    [during-training monitor]")
+    print(f"Test  ({args.task}): {len(test_df)}   [final in-distribution eval]")
+    print(f"Ext   ({args.task}): {len(ext_df)}    [supplementary OOD eval]")
 
-    val_csv = f"valid_{args.task}.csv"
-    val_df = pd.read_csv(pkg / "manifest" / val_csv)
-    print(f"Valid ({args.task}): {len(val_df)}")
+    train_ds = TomatoDataset(train_df, package_root=pkg,
+                             transform=build_train_transform(), use_albumentations=True)
+    val_ds   = TomatoDataset(val_df,   package_root=pkg,
+                             transform=build_eval_transform(),  use_albumentations=True)
+    test_ds  = TomatoDataset(test_df,  package_root=pkg,
+                             transform=build_eval_transform(),  use_albumentations=True)
+    ext_ds   = TomatoDataset(ext_df,   package_root=pkg,
+                             transform=build_eval_transform(),  use_albumentations=True)
 
-    train_ds = TomatoDataset(
-        train_df, package_root=pkg,
-        transform=build_train_transform(), use_albumentations=True,
-    )
-    val_ds = TomatoDataset(
-        val_df, package_root=pkg,
-        transform=build_eval_transform(), use_albumentations=True,
-    )
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
-                            num_workers=args.workers, pin_memory=True)
+    val_loader   = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
+                              num_workers=args.workers, pin_memory=True)
+    test_loader  = DataLoader(test_ds, batch_size=args.batch, shuffle=False,
+                              num_workers=args.workers, pin_memory=True)
+    ext_loader   = DataLoader(ext_ds, batch_size=args.batch, shuffle=False,
+                              num_workers=args.workers, pin_memory=True)
 
     # ── 모델 ──────────────────────────────────────────────
     model = SingleTaskModel(backbone_name=args.backbone, num_classes=2, pretrained=True)
@@ -109,30 +117,36 @@ def main():
     )
     history = trainer.fit()
 
-    # ── 외부 평가 ────────────────────────────────────────
+    # ── 평가: test_split (in-distribution, 메인) + ext (OOD, 보조) ──
     model.eval()
     device = next(model.parameters()).device
-    all_preds, all_targets = [], []
-    with torch.no_grad():
-        for batch in val_loader:
-            x = batch["image"].to(device)
-            y = batch["y_mat" if args.task == "maturity" else "y_qual"]
-            preds = model(x).argmax(dim=1).cpu()
-            all_preds.extend(preds.tolist())
-            all_targets.extend(y.tolist())
+    target_key = "y_mat" if args.task == "maturity" else "y_qual"
 
-    eval_res = evaluate_predictions(
-        y_true=all_targets, y_pred=all_preds,
-        task_name=f"{args.task} (external)",
-        class_names=CLASS_NAMES[args.task],
-    )
-    print()
-    print(format_metrics_report(eval_res))
+    def predict_loader(loader):
+        preds, targets = [], []
+        with torch.no_grad():
+            for batch in loader:
+                x = batch["image"].to(device)
+                y = batch[target_key]
+                preds.extend(model(x).argmax(dim=1).cpu().tolist())
+                targets.extend(y.tolist())
+        return preds, targets
+
+    all_evals = {}
+    for name, loader in [("test_indistribution", test_loader), ("ext_ood", ext_loader)]:
+        preds, targets = predict_loader(loader)
+        all_evals[name] = evaluate_predictions(
+            y_true=targets, y_pred=preds,
+            task_name=f"{args.task} [{name}]",
+            class_names=CLASS_NAMES[args.task],
+        )
+        print()
+        print(format_metrics_report(all_evals[name]))
 
     # 결과 저장
     out_dir = Path(args.save_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "eval.json").write_text(json.dumps(eval_res, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "eval.json").write_text(json.dumps(all_evals, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n결과 저장: {out_dir / 'eval.json'}")
 
 

@@ -74,24 +74,32 @@ def main():
     seed_everything(args.seed)
     pkg = Path(args.package) if args.package else resolve_package_root()
 
-    # train.csv: 모든 4 클래스 데이터 사용
-    train_df = pd.read_csv(pkg / "manifest" / "train.csv")
-    val_mat_df = pd.read_csv(pkg / "manifest" / "valid_maturity.csv")
-    val_qual_df = pd.read_csv(pkg / "manifest" / "valid_quality.csv")
+    # In-distribution split + supplementary external valid
+    train_df = pd.read_csv(pkg / "manifest" / "train_split.csv")
+    val_df   = pd.read_csv(pkg / "manifest" / "val_split.csv")
+    test_df  = pd.read_csv(pkg / "manifest" / "test_split.csv")
+    ext_mat_df  = pd.read_csv(pkg / "manifest" / "valid_maturity.csv")
+    ext_qual_df = pd.read_csv(pkg / "manifest" / "valid_quality.csv")
+    print(f"Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
+    print(f"Ext maturity: {len(ext_mat_df)}  Ext quality: {len(ext_qual_df)}")
 
     train_ds = JointDataset(train_df, pkg, build_train_transform(), use_albumentations=True)
-    val_mat_ds = JointDataset(val_mat_df, pkg, build_eval_transform(), use_albumentations=True)
-    val_qual_ds = JointDataset(val_qual_df, pkg, build_eval_transform(), use_albumentations=True)
+    val_ds   = JointDataset(val_df,   pkg, build_eval_transform(),  use_albumentations=True)
+    test_ds  = JointDataset(test_df,  pkg, build_eval_transform(),  use_albumentations=True)
+    ext_mat_ds  = JointDataset(ext_mat_df,  pkg, build_eval_transform(), use_albumentations=True)
+    ext_qual_ds = JointDataset(ext_qual_df, pkg, build_eval_transform(), use_albumentations=True)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, pin_memory=True, drop_last=True)
-    val_mat_loader = DataLoader(val_mat_ds, batch_size=args.batch, shuffle=False,
-                                num_workers=args.workers, pin_memory=True)
-    val_qual_loader = DataLoader(val_qual_ds, batch_size=args.batch, shuffle=False,
-                                 num_workers=args.workers, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False,
+                              num_workers=args.workers, pin_memory=True)
+    test_loader  = DataLoader(test_ds,  batch_size=args.batch, shuffle=False,
+                              num_workers=args.workers, pin_memory=True)
+    ext_mat_loader  = DataLoader(ext_mat_ds,  batch_size=args.batch, shuffle=False,
+                                  num_workers=args.workers, pin_memory=True)
+    ext_qual_loader = DataLoader(ext_qual_ds, batch_size=args.batch, shuffle=False,
+                                  num_workers=args.workers, pin_memory=True)
 
-    # 학습 중 val_metric 은 양쪽 평가셋의 합 (간소화 — fit 후 별도 평가)
-    # 여기선 maturity val 로만 비교 (간단히)
     model = JointSingleHeadModel(backbone_name=args.backbone, pretrained=True)
     run_name = f"joint_{args.backbone}_seed{args.seed}"
     cfg = TrainConfig(epochs=args.epochs, lr=args.lr,
@@ -101,47 +109,64 @@ def main():
         return float(f1_score(targets, preds, average="macro", zero_division=0))
 
     trainer = Trainer(
-        model=model, train_loader=train_loader, val_loader=val_mat_loader,
+        model=model, train_loader=train_loader, val_loader=val_loader,
         step_fn=joint_step, val_metric_fn=val_metric_fn,
         device="cuda" if torch.cuda.is_available() else "cpu", cfg=cfg,
     )
     trainer.fit()
 
-    # ── 외부 평가 (Maturity / Quality 각 슬라이스) ──────
+    # ── 평가: test_split 메인 + 외부 보조 ──────────────────
     model.eval()
     device = next(model.parameters()).device
 
-    def collect(loader, task_indices):
+    def collect(loader, task_indices, target_key):
         preds, targets = [], []
         with torch.no_grad():
             for batch in loader:
                 x = batch["image"].to(device)
                 logits = model(x)
-                # 해당 task slice 만 argmax
                 slice_logits = logits[:, list(task_indices)]
-                pred = slice_logits.argmax(dim=1).cpu()
-                preds.extend(pred.tolist())
-                # batch 의 GT (Maturity: y_mat, Quality: y_qual)
-                key = "y_mat" if task_indices == MATURITY_INDICES else "y_qual"
-                targets.extend(batch[key].cpu().tolist())
+                preds.extend(slice_logits.argmax(dim=1).cpu().tolist())
+                targets.extend(batch[target_key].cpu().tolist())
         return preds, targets
 
     out_dir = Path(args.save_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     eval_results = {}
 
-    for task, loader, indices in [
-        ("maturity", val_mat_loader, MATURITY_INDICES),
-        ("quality",  val_qual_loader, QUALITY_INDICES),
+    # In-distribution test (Maturity slice & Quality slice 모두)
+    for task, indices, key in [
+        ("maturity", MATURITY_INDICES, "y_mat"),
+        ("quality",  QUALITY_INDICES,  "y_qual"),
     ]:
-        preds, targets = collect(loader, indices)
-        eval_res = evaluate_predictions(
-            y_true=targets, y_pred=preds,
-            task_name=f"{task} (joint single-head, external)",
+        preds, targets = collect(test_loader, indices, key)
+        # test split 에는 4 클래스 모두 섞여 있으므로, 해당 task GT 가 있는 샘플만 사용
+        # JointDataset 에선 모든 row 가 y_mat/y_qual 중 하나만 valid 라벨 (다른 건 MASK_INDEX -1)
+        from src.data.dataset import MASK_INDEX
+        filt_preds, filt_targets = [], []
+        for p, t in zip(preds, targets):
+            if t != MASK_INDEX:
+                filt_preds.append(p); filt_targets.append(t)
+        eval_results[f"{task}_test_indistribution"] = evaluate_predictions(
+            y_true=filt_targets, y_pred=filt_preds,
+            task_name=f"{task} [test_indistribution]",
             class_names=CLASS_NAMES[task],
         )
-        print("\n" + format_metrics_report(eval_res))
-        eval_results[task] = eval_res
+        print("\n" + format_metrics_report(eval_results[f"{task}_test_indistribution"]))
+
+    # External OOD
+    for task, loader, indices in [
+        ("maturity", ext_mat_loader,  MATURITY_INDICES),
+        ("quality",  ext_qual_loader, QUALITY_INDICES),
+    ]:
+        key = "y_mat" if task == "maturity" else "y_qual"
+        preds, targets = collect(loader, indices, key)
+        eval_results[f"{task}_ext_ood"] = evaluate_predictions(
+            y_true=targets, y_pred=preds,
+            task_name=f"{task} [ext_ood]",
+            class_names=CLASS_NAMES[task],
+        )
+        print("\n" + format_metrics_report(eval_results[f"{task}_ext_ood"]))
 
     (out_dir / "eval.json").write_text(json.dumps(eval_results, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n결과 저장: {out_dir / 'eval.json'}")

@@ -62,23 +62,29 @@ def main():
     seed_everything(args.seed)
     pkg = Path(args.package) if args.package else resolve_package_root()
 
-    train_df = pd.read_csv(pkg / "manifest" / "train.csv")
-    val_mat_df = pd.read_csv(pkg / "manifest" / "valid_maturity.csv")
-    val_qual_df = pd.read_csv(pkg / "manifest" / "valid_quality.csv")
+    train_df = pd.read_csv(pkg / "manifest" / "train_split.csv")
+    val_df   = pd.read_csv(pkg / "manifest" / "val_split.csv")
+    test_df  = pd.read_csv(pkg / "manifest" / "test_split.csv")
+    ext_mat_df  = pd.read_csv(pkg / "manifest" / "valid_maturity.csv")
+    ext_qual_df = pd.read_csv(pkg / "manifest" / "valid_quality.csv")
+    print(f"Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}")
+    print(f"Ext maturity: {len(ext_mat_df)}  Ext quality: {len(ext_qual_df)}")
 
-    train_ds = TomatoDataset(train_df, package_root=pkg,
-                             transform=build_train_transform(), use_albumentations=True)
-    val_mat_ds = TomatoDataset(val_mat_df, package_root=pkg,
-                               transform=build_eval_transform(), use_albumentations=True)
-    val_qual_ds = TomatoDataset(val_qual_df, package_root=pkg,
-                                transform=build_eval_transform(), use_albumentations=True)
+    def ds(df, tr): return TomatoDataset(df, package_root=pkg, transform=tr, use_albumentations=True)
+    train_ds = ds(train_df, build_train_transform())
+    val_ds   = ds(val_df,   build_eval_transform())
+    test_ds  = ds(test_df,  build_eval_transform())
+    ext_mat_ds  = ds(ext_mat_df,  build_eval_transform())
+    ext_qual_ds = ds(ext_qual_df, build_eval_transform())
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
-                              num_workers=args.workers, pin_memory=True, drop_last=True)
-    val_mat_loader = DataLoader(val_mat_ds, batch_size=args.batch, shuffle=False,
-                                num_workers=args.workers, pin_memory=True)
-    val_qual_loader = DataLoader(val_qual_ds, batch_size=args.batch, shuffle=False,
-                                 num_workers=args.workers, pin_memory=True)
+    def loader(d, shuffle=False, drop_last=False):
+        return DataLoader(d, batch_size=args.batch, shuffle=shuffle,
+                          num_workers=args.workers, pin_memory=True, drop_last=drop_last)
+    train_loader = loader(train_ds, shuffle=True, drop_last=True)
+    val_loader   = loader(val_ds)
+    test_loader  = loader(test_ds)
+    ext_mat_loader  = loader(ext_mat_ds)
+    ext_qual_loader = loader(ext_qual_ds)
 
     model = NaiveMultiHeadModel(backbone_name=args.backbone, pretrained=True)
     run_name = f"naive_multi_{args.backbone}_seed{args.seed}"
@@ -86,23 +92,23 @@ def main():
                       save_dir=args.save_dir, run_name=run_name)
 
     trainer = Trainer(
-        model=model, train_loader=train_loader, val_loader=val_mat_loader,
+        model=model, train_loader=train_loader, val_loader=val_loader,
         step_fn=multitask_step,
         val_metric_fn=lambda preds, tgt: f1_score(tgt, preds, average="macro", zero_division=0),
         device="cuda" if torch.cuda.is_available() else "cpu", cfg=cfg,
     )
     trainer.fit()
 
-    # ── 외부 평가 ───────────────────────────────────────
+    # ── 평가: test_split (in-distribution) + 외부 OOD ───
     model.eval()
     device = next(model.parameters()).device
     eval_results = {}
 
-    def predict_loader(loader, head: str):
+    def predict_loader(loader_, head: str):
         preds, targets = [], []
         target_key = "y_mat" if head == "maturity" else "y_qual"
         with torch.no_grad():
-            for batch in loader:
+            for batch in loader_:
                 x = batch["image"].to(device)
                 out = model(x)
                 logits = out.maturity_logits if head == "maturity" else out.quality_logits
@@ -110,15 +116,27 @@ def main():
                 targets.extend(batch[target_key].tolist())
         return preds, targets
 
-    for task, loader in [("maturity", val_mat_loader), ("quality", val_qual_loader)]:
-        preds, targets = predict_loader(loader, head=task)
-        eval_res = evaluate_predictions(
-            y_true=targets, y_pred=preds,
-            task_name=f"{task} (naive multi-head, external)",
-            class_names=CLASS_NAMES[task],
+    from src.data.dataset import MASK_INDEX
+    # in-distribution test (test_split 안에 두 task 가 섞여있음 → MASK 인 GT 제외)
+    for head in ["maturity", "quality"]:
+        preds, targets = predict_loader(test_loader, head=head)
+        fp, ft = zip(*[(p, t) for p, t in zip(preds, targets) if t != MASK_INDEX])
+        eval_results[f"{head}_test_indistribution"] = evaluate_predictions(
+            y_true=list(ft), y_pred=list(fp),
+            task_name=f"{head} [test_indistribution]",
+            class_names=CLASS_NAMES[head],
         )
-        print("\n" + format_metrics_report(eval_res))
-        eval_results[task] = eval_res
+        print("\n" + format_metrics_report(eval_results[f"{head}_test_indistribution"]))
+
+    # external OOD
+    for head, ldr in [("maturity", ext_mat_loader), ("quality", ext_qual_loader)]:
+        preds, targets = predict_loader(ldr, head=head)
+        eval_results[f"{head}_ext_ood"] = evaluate_predictions(
+            y_true=targets, y_pred=preds,
+            task_name=f"{head} [ext_ood]",
+            class_names=CLASS_NAMES[head],
+        )
+        print("\n" + format_metrics_report(eval_results[f"{head}_ext_ood"]))
 
     out_dir = Path(args.save_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)

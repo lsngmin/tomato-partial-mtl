@@ -83,41 +83,48 @@ def main():
     seed_everything(args.seed)
     pkg = Path(args.package) if args.package else resolve_package_root()
 
-    # 학습 데이터 (해당 task 만)
-    train_df = pd.read_csv(pkg / "manifest" / "train.csv")
+    # In-distribution split + supplementary external
+    train_df = pd.read_csv(pkg / "manifest" / "train_split.csv")
+    test_df  = pd.read_csv(pkg / "manifest" / "test_split.csv")
     train_df = train_df[train_df["task"] == args.task].reset_index(drop=True)
-    val_df = pd.read_csv(pkg / "manifest" / f"valid_{args.task}.csv")
-
-    print(f"Train: {len(train_df)}  Valid: {len(val_df)}")
+    test_df  = test_df[test_df["task"]  == args.task].reset_index(drop=True)
+    ext_df   = pd.read_csv(pkg / "manifest" / f"valid_{args.task}.csv")
+    print(f"Train: {len(train_df)}  Test: {len(test_df)}  Ext: {len(ext_df)}")
 
     t0 = time.time()
     X_train, y_train = load_dataset(train_df, pkg)
-    X_val,   y_val   = load_dataset(val_df, pkg)
+    X_test,  y_test  = load_dataset(test_df, pkg)
+    X_ext,   y_ext   = load_dataset(ext_df, pkg)
     print(f"Feature extraction: {time.time()-t0:.1f}s,  shape={X_train.shape}")
 
     # 표준화 + LinearSVC
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
-    X_val_s = scaler.transform(X_val)
+    X_test_s  = scaler.transform(X_test)
+    X_ext_s   = scaler.transform(X_ext)
 
     clf = LinearSVC(C=1.0, max_iter=5000, random_state=args.seed)
     t0 = time.time()
     clf.fit(X_train_s, y_train)
     print(f"SVC training: {time.time()-t0:.1f}s")
-    preds = clf.predict(X_val_s)
 
-    eval_res = evaluate_predictions(
-        y_true=y_val, y_pred=preds,
-        task_name=f"{args.task} (HOG+ColorHist+SVM)",
-        class_names=CLASS_NAMES[args.task],
-    )
-    print()
-    print(format_metrics_report(eval_res))
+    # in-distribution + ext 평가
+    eval_results = {}
+    for name, X, y in [("test_indistribution", X_test_s, y_test),
+                        ("ext_ood",            X_ext_s,  y_ext)]:
+        preds = clf.predict(X)
+        eval_results[name] = evaluate_predictions(
+            y_true=y, y_pred=preds,
+            task_name=f"{args.task} [HOG+ColorHist+SVM, {name}]",
+            class_names=CLASS_NAMES[args.task],
+        )
+        print()
+        print(format_metrics_report(eval_results[name]))
 
     run_name = f"cv_baseline_{args.task}_seed{args.seed}"
     out_dir = Path(args.save_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "eval.json").write_text(json.dumps(eval_res, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "eval.json").write_text(json.dumps(eval_results, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n결과 저장: {out_dir / 'eval.json'}")
 
 
