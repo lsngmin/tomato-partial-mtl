@@ -52,8 +52,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--task", required=True, choices=["maturity", "quality"])
     p.add_argument("--seed", type=int, default=42)
+    from src.models.backbone import BACKBONE_REGISTRY
     p.add_argument("--backbone", default="resnet50",
-                   choices=["resnet50", "efficientnet_b3", "swin_t"])
+                   choices=sorted(BACKBONE_REGISTRY))
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-4)
