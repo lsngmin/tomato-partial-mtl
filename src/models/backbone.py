@@ -18,15 +18,27 @@ from torchvision import models
 from torchvision.models import (
     ResNet50_Weights,
     EfficientNet_B3_Weights,
+    EfficientNet_B0_Weights,
     Swin_T_Weights,
+    MobileNet_V2_Weights,
+    MobileNet_V3_Small_Weights,
+    MobileNet_V3_Large_Weights,
+    ShuffleNet_V2_X1_0_Weights,
 )
 
 
 # 백본별 feature 차원 (분류 헤드 제거 후 출력)
 FEATURE_DIM: dict[str, int] = {
-    "resnet50":         2048,
-    "efficientnet_b3":  1536,
-    "swin_t":            768,
+    # 무거운 reference
+    "resnet50":              2048,
+    "efficientnet_b3":       1536,
+    "swin_t":                 768,
+    # 경량 (스마트팜 / edge 배포 후보)
+    "mobilenet_v2":          1280,   # 3.4M params
+    "mobilenet_v3_small":     576,   # 2.5M params
+    "mobilenet_v3_large":     960,   # 5.4M params
+    "efficientnet_b0":       1280,   # 5.3M params
+    "shufflenet_v2_x1_0":    1024,   # 2.3M params
 }
 
 
@@ -58,10 +70,56 @@ def _build_swin_t(pretrained: bool = True) -> nn.Module:
     return m
 
 
+# ─────────────────────────────────────────────────────────────
+# 경량 백본 (스마트팜 / edge 배포)
+# ─────────────────────────────────────────────────────────────
+
+def _build_mobilenet_v2(pretrained: bool = True) -> nn.Module:
+    weights = MobileNet_V2_Weights.IMAGENET1K_V2 if pretrained else None
+    m = models.mobilenet_v2(weights=weights)
+    m.classifier = nn.Identity()  # → (B, 1280)
+    return m
+
+
+def _build_mobilenet_v3_small(pretrained: bool = True) -> nn.Module:
+    weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
+    m = models.mobilenet_v3_small(weights=weights)
+    m.classifier = nn.Identity()  # → (B, 576)
+    return m
+
+
+def _build_mobilenet_v3_large(pretrained: bool = True) -> nn.Module:
+    weights = MobileNet_V3_Large_Weights.IMAGENET1K_V2 if pretrained else None
+    m = models.mobilenet_v3_large(weights=weights)
+    m.classifier = nn.Identity()  # → (B, 960)
+    return m
+
+
+def _build_efficientnet_b0(pretrained: bool = True) -> nn.Module:
+    weights = EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
+    m = models.efficientnet_b0(weights=weights)
+    m.classifier = nn.Identity()  # → (B, 1280)
+    return m
+
+
+def _build_shufflenet_v2_x1_0(pretrained: bool = True) -> nn.Module:
+    weights = ShuffleNet_V2_X1_0_Weights.IMAGENET1K_V1 if pretrained else None
+    m = models.shufflenet_v2_x1_0(weights=weights)
+    m.fc = nn.Identity()  # → (B, 1024)
+    return m
+
+
 BACKBONE_REGISTRY: dict[str, Callable[[bool], nn.Module]] = {
-    "resnet50":        _build_resnet50,
-    "efficientnet_b3": _build_efficientnet_b3,
-    "swin_t":          _build_swin_t,
+    # 무거운 reference
+    "resnet50":              _build_resnet50,
+    "efficientnet_b3":       _build_efficientnet_b3,
+    "swin_t":                _build_swin_t,
+    # 경량
+    "mobilenet_v2":          _build_mobilenet_v2,
+    "mobilenet_v3_small":    _build_mobilenet_v3_small,
+    "mobilenet_v3_large":    _build_mobilenet_v3_large,
+    "efficientnet_b0":       _build_efficientnet_b0,
+    "shufflenet_v2_x1_0":    _build_shufflenet_v2_x1_0,
 }
 
 
@@ -92,6 +150,7 @@ def build_backbone(name: str, pretrained: bool = True) -> nn.Module:
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     x = torch.randn(2, 3, 224, 224)
+    print(f"{'backbone':22s} {'feature':>12s}  {'params (M)':>12s}")
     for name in BACKBONE_REGISTRY:
         m = build_backbone(name, pretrained=False)
         m.eval()
@@ -99,4 +158,5 @@ if __name__ == "__main__":
             y = m(x)
         expected = FEATURE_DIM[name]
         assert y.shape == (2, expected), (name, y.shape, expected)
-        print(f"  {name:18s} → feature shape {y.shape}  ✓")
+        n_params = sum(p.numel() for p in m.parameters()) / 1e6
+        print(f"  {name:20s} {str(tuple(y.shape)):>12s}  {n_params:>10.2f}M")
